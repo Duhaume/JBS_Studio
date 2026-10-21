@@ -39,15 +39,16 @@ import platform
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.request
 from urllib.parse import urlparse
 
 import vlc
-from PyQt5.QtCore import Qt, QObject, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QObject, QSettings, QTimer, pyqtSignal
 from PyQt5.QtGui import QGuiApplication, QKeySequence, QBrush, QColor, QPalette, QPen
 from PyQt5.QtWidgets import (
     QAbstractItemView, QAction, QApplication, QCheckBox, QFileDialog, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QShortcut, QSlider, QToolButton,
+    QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMessageBox, QProgressBar, QPushButton, QShortcut, QSizePolicy, QSlider, QToolButton,
     QStyle, QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout, QWidget
 )
 
@@ -65,6 +66,27 @@ NAME_ROLE = Qt.UserRole + 8
 PLAYLIST_ROW_ROLE = Qt.UserRole + 9
 AUTO_NEXT_ROLE = Qt.UserRole + 10
 IS_PLAYING_ROLE = Qt.UserRole + 11
+
+# --- Pupitre virtuel (reproduit la page 10 du Stream Deck XL : 8 x 4) ---
+# Colonne 0 des 3 premieres lignes : UP / page / DOWN ; le reste : scenes 1 a 21.
+# Derniere ligne : PF, Scene Off, Salle on/off, Salle 20%, Noir Silence,
+# Plein Ecran, Precedente, GO.
+DECK_SCENES_PER_PAGE = 21
+COMPANION_DEFAULT_ADDRESS = "10.37.4.10:8000"   # hote:port de Bitfocus Companion
+COMPANION_PAGE = 10                              # page du pupitre dans Companion
+# Touches de la derniere ligne : (colonne, ligne1, ligne2, action)
+#   action "companion" = appui du bouton 10/3/<colonne> dans Companion (lumieres, via HA)
+#   autres = commande locale JBS Studio
+DECK_BOTTOM = [
+    (0, "PF", "", "companion"),
+    (1, "Scene", "Off", "companion"),
+    (2, "Salle", "on/off", "companion"),
+    (3, "Salle", "20%", "companion"),
+    (4, "Noir", "Silence", "stop"),
+    (5, "Plein", "Ecran", "fullscreen"),
+    (6, "\u25c0", "Prec.", "previous"),
+    (7, "GO", "", "next"),
+]
 
 CURRENT_SCENE_COLOR = "#2e7d32"  # vert : scene en cours de lecture
 
@@ -252,6 +274,216 @@ class SceneItemDelegate(QStyledItemDelegate):
             painter.restore()
 
 
+class DeckWindow(QWidget):
+    """Pupitre virtuel : copie de la page 10 du Stream Deck XL (8 x 4).
+    - Touches 1 a 21 : lancent la scene par son NUMERO (comme /scene/<n>).
+    - UP / DOWN : changent de page de scenes.
+    - Prec. / GO : /previous et /next ; GO affiche la scene en cours.
+    - Noir Silence : stop ; Plein Ecran : plein ecran de la sortie.
+    - PF, Scene Off, Salle on/off, Salle 20% : lumieres, geres par Home
+      Assistant via Companion -> envoient l'appui du bouton a Companion
+      (POST /api/location/<page>/<ligne>/<colonne>/press, Companion >= 3)."""
+    pressResult = pyqtSignal(str, bool)
+
+    def __init__(self, ctrl):
+        super().__init__(ctrl)
+        self.ctrl = ctrl
+        self.page = 0
+        self._last_index = -2
+        self._signature = None
+        self.settings = QSettings("JBS", "Studio")
+        self.setWindowTitle("Pupitre")
+        self.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint)
+        self.setStyleSheet(
+            "DeckWindow { background: #1b1b1b; }"
+            "QPushButton { background: #2d2d2d; color: white; border: 1px solid #444;"
+            " border-radius: 8px; font-weight: bold; }"
+            "QPushButton:hover { border-color: #888; }"
+            "QPushButton:pressed { background: #555; }"
+            "QPushButton[ds=nav] { background: #1f3b5f; }"
+            "QPushButton[ds=empty] { background: #222; color: #666; }"
+            "QPushButton[ds=playing] { background: #2e7d32; border-color: #7bd88f; }"
+            "QPushButton[ds=go] { background: #1f5f2b; }"
+            "QPushButton[ds=warn] { background: #b36b00; }"
+            "QPushButton[ds=stop] { background: #8b1f1f; }"
+            "QPushButton[ds=light] { background: #5f4b1f; }"
+        )
+        layout = QVBoxLayout(self)
+        grid = QGridLayout()
+        grid.setSpacing(8)
+
+        def key(text, row, col, style="", slot=None):
+            btn = QPushButton(text)
+            btn.setMinimumSize(92, 80)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            btn.setProperty("ds", style)
+            if slot is not None:
+                btn.clicked.connect(lambda _=False: slot())
+            grid.addWidget(btn, row, col)
+            return btn
+
+        self.btn_up = key("UP", 0, 0, "nav", lambda: self.change_page(-1))
+        self.btn_page = key("", 1, 0, "nav")
+        self.btn_down = key("DOWN", 2, 0, "nav", lambda: self.change_page(1))
+        self.scene_buttons = []
+        for r in range(3):
+            for c in range(1, 8):
+                k = r * 7 + (c - 1)
+                self.scene_buttons.append(
+                    key("", r, c, "", lambda k=k: self._on_scene_clicked(k)))
+
+        self.btn_go = None
+        for col, l1, l2, action in DECK_BOTTOM:
+            text = l1 + ("\n" + l2 if l2 else "")
+            style = {"companion": "light", "stop": "stop", "next": "go"}.get(action, "")
+            if action == "companion":
+                slot = lambda c=col, t=text: self.press_companion(c, t.replace("\n", " "))
+            elif action == "stop":
+                slot = ctrl.stop_playback
+            elif action == "fullscreen":
+                slot = ctrl.toggle_output_fullscreen
+            elif action == "previous":
+                slot = ctrl.go_previous
+            else:
+                slot = ctrl.go_next
+            btn = key(text, 3, col, style, slot)
+            if action == "next":
+                self.btn_go = btn
+
+        layout.addLayout(grid)
+        self.status = QLabel("")
+        self.status.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.status.setFixedHeight(16)
+        layout.addWidget(self.status)
+        self.pressResult.connect(self._on_result)
+
+    def resizeEvent(self, event):
+        # Le texte des touches suit la taille de la fenetre.
+        size = max(12, min(34, int(self.height() / 18)))
+        for btn in self.findChildren(QPushButton):
+            f = btn.font()
+            f.setPixelSize(size)
+            btn.setFont(f)
+        super().resizeEvent(event)
+
+    # --- Companion (touches lumiere) --------------------------------------
+    def address(self):
+        return str(self.settings.value("companion_address", COMPANION_DEFAULT_ADDRESS))
+
+    def ask_address(self):
+        text, ok = QInputDialog.getText(
+            self, "Adresse de Companion", "Adresse (hote:port) :", text=self.address())
+        text = text.strip()
+        host, _, port = text.rpartition(":")
+        if not ok or not text:
+            return
+        if not host or not port.isdigit():
+            QMessageBox.warning(self, "Adresse invalide", "Format attendu : hote:port (ex. 10.37.4.10:8000)")
+            return
+        self.settings.setValue("companion_address", text)
+        self.status.setText("Adresse enregistree")
+
+    def press_companion(self, col, name):
+        url = f"http://{self.address()}/api/location/{COMPANION_PAGE}/3/{col}/press"
+        threading.Thread(target=self._send, args=(url, name), daemon=True).start()
+
+    def _send(self, url, name):
+        # Thread separe : ne bloque jamais l'interface si Companion ne repond pas.
+        try:
+            req = urllib.request.Request(url, data=b"", method="POST")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                ok = 200 <= resp.status < 300
+            self.pressResult.emit(name, ok)
+        except Exception:
+            self.pressResult.emit(name, False)
+
+    def _on_result(self, name, ok):
+        if ok:
+            self.status.setText(f"\u2713 {name} envoye a Companion")
+        else:
+            self.status.setText(f"\u2717 {name} : Companion injoignable ({self.address()})")
+
+    # --- scenes -----------------------------------------------------------
+    def _numbers(self):
+        """numero (int) -> ligne, pour les scenes dont le numero est un entier >= 1."""
+        out = {}
+        pl = self.ctrl.playlist
+        for row in range(pl.count()):
+            n = pl.item(row).data(NUMBER_ROLE)
+            if n and str(n).isdigit() and int(n) >= 1:
+                out[int(n)] = row
+        return out
+
+    def _page_count(self):
+        nums = self._numbers()
+        top = max(nums) if nums else 1
+        return max(1, -(-top // DECK_SCENES_PER_PAGE))
+
+    def change_page(self, delta):
+        self.page = max(0, min(self._page_count() - 1, self.page + delta))
+        self._signature = None
+        self.refresh()
+
+    def _on_scene_clicked(self, k):
+        n = self.page * DECK_SCENES_PER_PAGE + k + 1
+        row = self._numbers().get(n)
+        if row is not None:
+            self.ctrl.play_scene(row)
+
+    @staticmethod
+    def _set_style(btn, style):
+        if btn.property("ds") != style:
+            btn.setProperty("ds", style)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    def refresh(self):
+        c = self.ctrl
+        pl = c.playlist
+        count = pl.count()
+        if c.current_index != self._last_index:
+            self._last_index = c.current_index
+            if 0 <= c.current_index < count:
+                n = pl.item(c.current_index).data(NUMBER_ROLE)
+                if n and str(n).isdigit() and int(n) >= 1:
+                    self.page = (int(n) - 1) // DECK_SCENES_PER_PAGE
+        pages = self._page_count()
+        self.page = max(0, min(pages - 1, self.page))
+        nums = self._numbers()
+        cur = pl.item(c.current_index) if 0 <= c.current_index < count else None
+
+        cells = []
+        for k in range(DECK_SCENES_PER_PAGE):
+            n = self.page * DECK_SCENES_PER_PAGE + k + 1
+            row = nums.get(n)
+            if row is None:
+                cells.append(("", "empty"))
+                continue
+            item = pl.item(row)
+            path, audio = item.data(PATH_ROLE), item.data(AUDIO_PATH_ROLE)
+            name = item.data(NAME_ROLE) or os.path.basename(path or audio or "")[:12]
+            style = "playing" if row == c.current_index else ("" if (path or audio) else "empty")
+            cells.append((f"{n}\n{name}" if name else str(n), style))
+        if cur is not None:
+            go_text = f"GO\n\u25b6 {cur.data(NUMBER_ROLE)}"
+            go_style = "go" if (cur.data(PATH_ROLE) or cur.data(AUDIO_PATH_ROLE)) else "warn"
+        else:
+            go_text, go_style = "GO", "go"
+
+        sig = (self.page, pages, tuple(cells), go_text, go_style)
+        if sig == self._signature:
+            return
+        self._signature = sig
+        for btn, (text, style) in zip(self.scene_buttons, cells):
+            btn.setText(text)
+            self._set_style(btn, style)
+        self.btn_go.setText(go_text)
+        self._set_style(self.btn_go, go_style)
+        self.btn_page.setText(f"PAGE\n{self.page + 1}/{pages}")
+        self.btn_up.setEnabled(self.page > 0)
+        self.btn_down.setEnabled(self.page < pages - 1)
+
+
 class OutputWindow(QWidget):
     """Fenetre plein ecran destinee au second ecran (sortie publique)."""
 
@@ -428,10 +660,18 @@ class ControlWindow(QMainWindow):
         self.btn_screen.setChecked(True)
         self.btn_screen.setText("\U0001F5A5")
         self.btn_screen.setToolTip("Activer / desactiver l'ecran de sortie")
-        for b_ in (self.btn_lock, self.btn_save, self.btn_screen):
+        self.deck_window = DeckWindow(self)  # pupitre de scenes
+        self.btn_deck = QToolButton()
+        self.btn_deck.setCheckable(True)
+        self.btn_deck.setText("\U0001F39B")
+        self.btn_deck.setToolTip("Afficher / masquer le pupitre de scenes")
+        self.btn_deck.toggled.connect(self._on_deck_toggled)
+        for b_ in (self.btn_lock, self.btn_save, self.btn_screen, self.btn_deck):
             b_.setStyleSheet("QToolButton { font-size: 20px; padding: 4px 8px; }"
                              "QToolButton:checked { background-color: #b71c1c; }")
             toolbar.addWidget(b_)
+        self.btn_deck.setStyleSheet("QToolButton { font-size: 20px; padding: 4px 8px; }"
+                                    "QToolButton:checked { background-color: #2e7d32; }")
         self.btn_screen.setStyleSheet("QToolButton { font-size: 20px; padding: 4px 8px; }"
                                       "QToolButton:!checked { background-color: #555; }")
         toolbar.addStretch()
@@ -636,6 +876,15 @@ class ControlWindow(QMainWindow):
         for a in (action_new, action_open, action_save, action_save_as):
             file_menu.addAction(a)
 
+        deck_menu = menubar.addMenu("Pupitre")
+        action_deck = QAction("Afficher le pupitre de scenes", self, checkable=True)
+        action_deck.toggled.connect(self.btn_deck.setChecked)
+        self.btn_deck.toggled.connect(action_deck.setChecked)
+        action_deck_addr = QAction("Adresse de Companion...", self)
+        action_deck_addr.triggered.connect(self.deck_window.ask_address)
+        deck_menu.addAction(action_deck)
+        deck_menu.addAction(action_deck_addr)
+
         screen_menu = menubar.addMenu("Ecran de sortie")
 
         self.toggle_output_action = QAction("Activer l'ecran de sortie", self, checkable=True)
@@ -736,6 +985,11 @@ class ControlWindow(QMainWindow):
             sc.setEnabled(not locked)
         self.on_selection_changed(self.playlist.currentRow())
 
+    def _on_deck_toggled(self, visible):
+        self.deck_window.setVisible(visible)
+        if visible:
+            self.deck_window.refresh()
+
     def update_current_highlight(self):
         color = QColor(CURRENT_SCENE_COLOR)
         lst = self.playlist
@@ -745,6 +999,8 @@ class ControlWindow(QMainWindow):
             it.setData(IS_PLAYING_ROLE, playing)
             it.setBackground(QBrush(color) if playing else QBrush())
         lst.viewport().update()
+        if hasattr(self, "deck_window") and self.deck_window.isVisible():
+            self.deck_window.refresh()
 
     def _vlc_end_callback(self, event):
         # Appele depuis un thread VLC : on ne fait qu'emettre un signal Qt,
@@ -1255,6 +1511,8 @@ class ControlWindow(QMainWindow):
 
     # ------------------------------------------------------------------ #
     def update_progress(self):
+        if self.deck_window.isVisible():
+            self.deck_window.refresh()  # suit mutes/renommages meme hors clic
         item = self.playlist.item(self.current_index) if 0 <= self.current_index < self.playlist.count() else None
         if item is not None and item.data(PATH_ROLE):
             player = self.program_player
@@ -1392,6 +1650,7 @@ class ControlWindow(QMainWindow):
         self.program_audio_player.release()
         self.vlc_instance.release()
         self.output_window.close()
+        self.deck_window.close()
         super().closeEvent(event)
 
 

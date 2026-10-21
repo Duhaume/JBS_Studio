@@ -68,15 +68,16 @@ AUTO_NEXT_ROLE = Qt.UserRole + 10
 IS_PLAYING_ROLE = Qt.UserRole + 11
 
 # --- Pupitre virtuel (reproduit la page 10 du Stream Deck XL : 8 x 4) ---
-# Colonne 0 des 3 premieres lignes : UP / page / DOWN ; le reste : scenes 1 a 21.
+# Colonne 0 des 3 premieres lignes : UP / page / DOWN ; le reste : scenes 1 a 21
+# (le numero seul, comme sur le vrai Stream Deck).
 # Derniere ligne : PF, Scene Off, Salle on/off, Salle 20%, Noir Silence,
 # Plein Ecran, Precedente, GO.
 DECK_SCENES_PER_PAGE = 21
 COMPANION_DEFAULT_ADDRESS = "10.37.4.10:8000"   # hote:port de Bitfocus Companion
 COMPANION_PAGE = 10                              # page du pupitre dans Companion
 # Touches de la derniere ligne : (colonne, ligne1, ligne2, action)
-#   action "companion" = appui du bouton 10/3/<colonne> dans Companion (lumieres, via HA)
-#   autres = commande locale JBS Studio
+#   "companion" = appui du bouton 10/3/<colonne> dans Companion (lumieres, via HA)
+#   autres      = commande locale JBS Studio
 DECK_BOTTOM = [
     (0, "PF", "", "companion"),
     (1, "Scene", "Off", "companion"),
@@ -276,13 +277,14 @@ class SceneItemDelegate(QStyledItemDelegate):
 
 class DeckWindow(QWidget):
     """Pupitre virtuel : copie de la page 10 du Stream Deck XL (8 x 4).
-    - Touches 1 a 21 : lancent la scene par son NUMERO (comme /scene/<n>).
+    - Touches 1 a 21 : numero seul ; lancent la scene par son NUMERO (/scene/<n>).
     - UP / DOWN : changent de page de scenes.
     - Prec. / GO : /previous et /next ; GO affiche la scene en cours.
     - Noir Silence : stop ; Plein Ecran : plein ecran de la sortie.
-    - PF, Scene Off, Salle on/off, Salle 20% : lumieres, geres par Home
-      Assistant via Companion -> envoient l'appui du bouton a Companion
-      (POST /api/location/<page>/<ligne>/<colonne>/press, Companion >= 3)."""
+    - PF, Scene Off, Salle on/off, Salle 20% : lumieres geres par Home Assistant,
+      donc appui du bouton correspondant dans Companion
+      (POST /api/location/<page>/<ligne>/<colonne>/press, Companion >= 3).
+    """
     pressResult = pyqtSignal(str, bool)
 
     def __init__(self, ctrl):
@@ -292,7 +294,7 @@ class DeckWindow(QWidget):
         self._last_index = -2
         self._signature = None
         self.settings = QSettings("JBS", "Studio")
-        self.setWindowTitle("Pupitre")
+        self.setWindowTitle("Streamdeck (boitier)")
         self.setWindowFlags(Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setStyleSheet(
             "DeckWindow { background: #1b1b1b; }"
@@ -307,6 +309,8 @@ class DeckWindow(QWidget):
             "QPushButton[ds=warn] { background: #b36b00; }"
             "QPushButton[ds=stop] { background: #8b1f1f; }"
             "QPushButton[ds=light] { background: #5f4b1f; }"
+            "QPushButton[ds=screen_on] { background: #1f5f2b; }"
+            "QPushButton[ds=screen_off] { background: #555; color: #ddd; }"
         )
         layout = QVBoxLayout(self)
         grid = QGridLayout()
@@ -351,6 +355,7 @@ class DeckWindow(QWidget):
                 self.btn_go = btn
 
         layout.addLayout(grid)
+
         self.status = QLabel("")
         self.status.setStyleSheet("color: #aaa; font-size: 11px;")
         self.status.setFixedHeight(16)
@@ -460,10 +465,9 @@ class DeckWindow(QWidget):
                 cells.append(("", "empty"))
                 continue
             item = pl.item(row)
-            path, audio = item.data(PATH_ROLE), item.data(AUDIO_PATH_ROLE)
-            name = item.data(NAME_ROLE) or os.path.basename(path or audio or "")[:12]
-            style = "playing" if row == c.current_index else ("" if (path or audio) else "empty")
-            cells.append((f"{n}\n{name}" if name else str(n), style))
+            has_media = bool(item.data(PATH_ROLE) or item.data(AUDIO_PATH_ROLE))
+            style = "playing" if row == c.current_index else ("" if has_media else "empty")
+            cells.append((str(n), style))          # numero seul, jamais le nom
         if cur is not None:
             go_text = f"GO\n\u25b6 {cur.data(NUMBER_ROLE)}"
             go_style = "go" if (cur.data(PATH_ROLE) or cur.data(AUDIO_PATH_ROLE)) else "warn"
@@ -491,6 +495,9 @@ class OutputWindow(QWidget):
         super().__init__()
         self.control_window = None
         self.setWindowTitle("Sortie")
+        # Toujours au premier plan (a definir avant la creation de la fenetre native
+        # que VLC utilise : changer les flags plus tard la recreerait).
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setStyleSheet("background-color: black;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -610,6 +617,7 @@ class ControlWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Controle de scenes")
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)  # JBS Studio reste au premier plan
         self.resize(680, 920)
 
         self.current_index = -1
@@ -648,32 +656,38 @@ class ControlWindow(QMainWindow):
         toolbar = QHBoxLayout()
         self.btn_lock = QToolButton()
         self.btn_lock.setCheckable(True)
-        self.btn_lock.setText("\U0001F513")
+        self.btn_lock.setText("\U0001F513\nVerrouillage")
         self.btn_lock.setToolTip("Verrouiller le spectacle (bloque l'edition)")
         self.btn_lock.toggled.connect(self.set_show_locked)
         self.btn_save = QToolButton()
-        self.btn_save.setText("\U0001F4BE")
+        self.btn_save.setText("\U0001F4BE\nEnregistrer")
         self.btn_save.setToolTip("Enregistrer le show (Ctrl+S)")
         self.btn_save.clicked.connect(self.save_show)
         self.btn_screen = QToolButton()
         self.btn_screen.setCheckable(True)
         self.btn_screen.setChecked(True)
-        self.btn_screen.setText("\U0001F5A5")
+        self.btn_screen.setText("\U0001F5A5\nSortie")
         self.btn_screen.setToolTip("Activer / desactiver l'ecran de sortie")
+        self.btn_fullscreen = QToolButton()
+        self.btn_fullscreen.setText("\u26f6\nPlein ecran")
+        self.btn_fullscreen.setToolTip("Plein ecran de la sortie on/off (F)")
+        self.btn_fullscreen.clicked.connect(lambda: self.toggle_output_fullscreen())
         self.deck_window = DeckWindow(self)  # pupitre de scenes
         self.btn_deck = QToolButton()
         self.btn_deck.setCheckable(True)
-        self.btn_deck.setText("\U0001F39B")
-        self.btn_deck.setToolTip("Afficher / masquer le pupitre de scenes")
+        self.btn_deck.setText("\U0001F39B\nStreamdeck\n(boitier)")
+        self.btn_deck.setToolTip("Afficher / masquer le Streamdeck (boitier)")
         self.btn_deck.toggled.connect(self._on_deck_toggled)
-        for b_ in (self.btn_lock, self.btn_save, self.btn_screen, self.btn_deck):
-            b_.setStyleSheet("QToolButton { font-size: 20px; padding: 4px 8px; }"
+        for b_ in (self.btn_lock, self.btn_save, self.btn_screen, self.btn_fullscreen, self.btn_deck):
+            b_.setStyleSheet("QToolButton { font-size: 13px; padding: 4px 10px; min-width: 70px; }"
                              "QToolButton:checked { background-color: #b71c1c; }")
             toolbar.addWidget(b_)
-        self.btn_deck.setStyleSheet("QToolButton { font-size: 20px; padding: 4px 8px; }"
+        self.btn_deck.setStyleSheet("QToolButton { font-size: 13px; padding: 4px 10px; min-width: 70px; }"
                                     "QToolButton:checked { background-color: #2e7d32; }")
-        self.btn_screen.setStyleSheet("QToolButton { font-size: 20px; padding: 4px 8px; }"
-                                      "QToolButton:!checked { background-color: #555; }")
+        self.btn_fullscreen.setStyleSheet("QToolButton { font-size: 13px; padding: 4px 10px; min-width: 70px; }")
+        self.btn_screen.setStyleSheet("QToolButton { font-size: 13px; padding: 4px 10px; min-width: 70px; }"
+                                      "QToolButton:checked { background-color: #2e7d32; color: white; }"
+                                      "QToolButton:!checked { background-color: #555; color: #ddd; }")
         toolbar.addStretch()
         outer.addLayout(toolbar)
 
@@ -876,8 +890,8 @@ class ControlWindow(QMainWindow):
         for a in (action_new, action_open, action_save, action_save_as):
             file_menu.addAction(a)
 
-        deck_menu = menubar.addMenu("Pupitre")
-        action_deck = QAction("Afficher le pupitre de scenes", self, checkable=True)
+        deck_menu = menubar.addMenu("Streamdeck (boitier)")
+        action_deck = QAction("Afficher le Streamdeck (boitier)", self, checkable=True)
         action_deck.toggled.connect(self.btn_deck.setChecked)
         self.btn_deck.toggled.connect(action_deck.setChecked)
         action_deck_addr = QAction("Adresse de Companion...", self)
@@ -918,6 +932,7 @@ class ControlWindow(QMainWindow):
             self.output_window.hide()
         for action in self.screen_actions:
             action.setEnabled(enabled)
+        self.btn_fullscreen.setEnabled(enabled)
 
     def send_output_to_screen(self, index):
         screens = QGuiApplication.screens()
@@ -973,7 +988,7 @@ class ControlWindow(QMainWindow):
     def set_show_locked(self, locked):
         """Cadenas : bloque l'edition, garde les commandes de jeu."""
         self.show_locked = locked
-        self.btn_lock.setText("\U0001F512" if locked else "\U0001F513")
+        self.btn_lock.setText("\U0001F512\nVerrouillage" if locked else "\U0001F513\nVerrouillage")
         self.playlist.setAcceptDrops(not locked)
         self.playlist.setDragEnabled(not locked)
         self.playlist.setDragDropMode(

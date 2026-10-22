@@ -1,10 +1,6 @@
-# JBS_Studio
+# JBS Studio — lecteur de scènes pour spectacles
 
-*JBS_Studio stands till I find a better name.*
-
-A lightweight alternative to OBS for live shows and school performances: numbered scenes, video + audio on a second screen, spacebar GO, HTTP API. Python, PyQt5, VLC.
-
-> Lecteur de scènes simple pour spectacles et événements scolaires : vidéo et audio sur un second écran, scènes numérotées, GO à la barre d'espace, API HTTP. Documentation en français ci-dessous.
+Lecteur de scènes simple pour spectacles et événements scolaires : vidéo et audio sur un second écran, scènes numérotées, GO à la barre d'espace, API HTTP.
 
 Python · PyQt5 · python-vlc · Windows / Linux
 
@@ -19,6 +15,8 @@ Un **show** est une liste ordonnée de **41 scènes numérotées de 0 à 40**. O
 Deux fenêtres :
 - **Fenêtre de contrôle** : ce que voit le régisseur (aperçu, liste, réglages).
 - **Fenêtre de sortie** : ce que voit le public, destinée au second écran. Si un seul écran est détecté, elle s'ouvre en mode fenêtré.
+
+Une troisième fenêtre, optionnelle, reproduit le **Streamdeck (boitier)** (voir 1.5). Les fenêtres restent **toujours au premier plan**.
 
 ## 1.2 La scène
 
@@ -50,13 +48,35 @@ Le numéro est attaché à la scène, mais l'**ordre de lecture est l'ordre d'af
 2. Glisser un fichier sur sa ligne (média principal), ou sur l'une des deux zones de dépôt du panneau de détails (principal / secondaire). Plusieurs fichiers déposés d'un coup remplissent les lignes suivantes.
 3. Régler nom, mutes, volumes, enchaînement.
 4. Réordonner par glisser-déposer si nécessaire. Copier/coller pour dupliquer les réglages d'une scène.
-5. Enregistrer (disquette ou Ctrl+S) dans un fichier `.json`.
+5. Enregistrer (bouton Enregistrer ou Ctrl+S) dans un fichier `.json`.
 
-## 1.5 Barre d'outils
+## 1.5 Barre d'outils et Streamdeck (boitier)
 
-- **Cadenas** : verrouille le spectacle. Tout ce qui modifie le contenu est bloqué (dépôts, réordonnancement, nom, assignation, copier/coller, enchaînement auto, nouveau/ouvrir). Les commandes de jeu restent actives (GO, mute, volumes, stop, API). Le verrou n'est pas enregistré : l'app démarre déverrouillée.
-- **Disquette** : enregistre le show.
-- **Écran** : active/désactive la fenêtre de sortie.
+- **Verrouillage** : verrouille le spectacle (blocage de l'édition ; détail ci-dessous). Rouge = verrouillé.
+- **Enregistrer** : enregistre le show (= Ctrl+S ; demande un nom au premier enregistrement).
+- **Sortie** : active / désactive l'écran de sortie (= menu « Ecran de sortie > Activer »). Vert = actif, gris = désactivé.
+- **Plein écran** : plein écran de la sortie on/off (= touche F). Grisé si la sortie est désactivée.
+- **Streamdeck (boitier)** : affiche / masque la fenêtre du boitier (voir plus bas).
+
+Les fenêtres de contrôle, de sortie et du boitier restent **toujours au premier plan** : aucune autre fenêtre ne passe devant.
+
+**Verrouillage** : tout ce qui modifie le contenu est bloqué (dépôts, réordonnancement, nom, assignation, copier/coller, enchaînement auto, nouveau/ouvrir). Les commandes de jeu restent actives (GO, mute, volumes, stop, API, Streamdeck). Le verrou n'est pas enregistré : l'app démarre déverrouillée.
+
+**Streamdeck (boitier)**
+
+Fenêtre optionnelle (bouton **Streamdeck (boitier)** ou menu du même nom) qui reproduit la **page 10 du Stream Deck XL** du pupitre de spectacle (8 colonnes × 4 lignes). Elle est redimensionnable : les touches et le texte s'adaptent.
+
+| Zone | Touches | Action |
+|---|---|---|
+| Colonne de gauche | UP / PAGE / DOWN | Change de page de scènes (1–21, puis 22–40) ; la page suit la scène en cours |
+| 3 premières lignes | 1 à 21 | Lance la scène par son **numéro** (comme `/scene/<n>`). Numéro seul affiché, jamais le nom. Vert = en cours, grisé = scène vide |
+| Dernière ligne | Noir Silence | Stop (image noire, silence) |
+| | Plein Écran | Plein écran de la sortie |
+| | ◀ Préc. / GO | Scène précédente / suivante ; GO affiche le numéro en cours (orange si la scène est vide) |
+
+Les touches **PF, Scène Off, Salle on/off, Salle 20 %** (lumières, pilotées par Home Assistant via Companion) sont une **option désactivée par défaut** : les quatre cases restent vides. Pour les activer, mettre `COMPANION_ENABLED = True` dans `media_scene_player.py` ou lancer avec `JBS_COMPANION=1`. Un menu « Adresse de Companion… » apparaît alors (défaut `10.37.4.10:8000`).
+
+Le Streamdeck (boitier) reste utilisable quand le spectacle est verrouillé.
 
 ## 1.6 Raccourcis clavier
 
@@ -161,6 +181,7 @@ Un seul fichier, `media_scene_player.py`.
 | `PlaylistWidget(QListWidget)` | Liste des scènes : réordonnancement interne (`InternalMove`) + dépôt de fichiers externes |
 | `SceneItemDelegate` | Rendu : vert pour la scène en cours, cadre bleu pour la sélection |
 | `DropZoneLabel(QLabel)` | Zone de dépôt de fichier (signal `fileDropped`) |
+| `DeckWindow(QWidget)` | Fenêtre « Streamdeck (boitier) » : copie de la page 10 d'un Stream Deck XL |
 | `Bridge(QObject)` | Pont thread-safe API HTTP → Qt (signaux) |
 | `make_http_handler(bridge)` | Fabrique du `BaseHTTPRequestHandler` |
 
@@ -208,13 +229,22 @@ Une seule `vlc.Instance`, trois `MediaPlayer` :
 
 ## 3.4 Interface
 
-Une seule vue : barre d'outils (cadenas, disquette, écran), aperçu, progression, liste, transport, détails de la scène sélectionnée.
+Une seule vue : barre d'outils (Verrouillage, Enregistrer, Sortie, Plein écran, Streamdeck), aperçu, progression, liste, transport, détails de la scène sélectionnée.
 
 - `on_selection_changed(row)` synchronise le panneau de détails avec l'item, en bloquant les signaux (`blockSignals`) pour éviter les boucles d'écriture.
 - **Verrou** : `set_show_locked` coupe le drag & drop de la liste, désactive les actions et raccourcis d'édition, puis rappelle `on_selection_changed` pour recalculer l'état des widgets. L'état est dans `self.show_locked`.
-- **Bouton écran ↔ menu** : le bouton et l'action `toggle_output_action` sont reliés par `toggled`, et `set_output_enabled` affiche/cache la fenêtre de sortie.
+- **Bouton écran ↔ menu** : le bouton et l'action `toggle_output_action` sont reliés par `toggled`, et `set_output_enabled` affiche/cache la fenêtre de sortie (et active/désactive le bouton Plein écran).
+- **Toujours au premier plan** : `Qt.WindowStaysOnTopHint` est posé sur `ControlWindow` et `OutputWindow` dans `__init__`, avant toute utilisation de `winId()`. Changer ce flag plus tard recréerait la fenêtre native et casserait le rattachement VLC, d'où l'absence d'interrupteur.
 - `SceneItemDelegate.paint` force `State_Active` : sans cela, quand la fenêtre perd le focus, Qt utilise la palette inactive et la sélection devient grise ou invisible. La palette `Inactive` de la liste est aussi alignée sur l'`Active`.
 - Plateforme : sous Linux, `main()` force `QT_QPA_PLATFORM=xcb` si la variable n'est pas définie (Wayland ne permet pas l'intégration VLC par identifiant X11).
+
+### Streamdeck (boitier) : `DeckWindow`
+
+- Fenêtre `Qt.Tool | WindowStaysOnTopHint`, grille 8 × 4 de `QPushButton` aux politiques `Expanding` ; `resizeEvent` règle la taille de police (`setPixelSize`) en fonction de la hauteur.
+- Les scènes sont adressées par **numéro** (`_numbers()` : numéro → ligne), pas par position dans la liste, comme `/scene/<n>`. Page = 21 scènes, 2 pages pour 40 scènes.
+- `refresh()` est appelé par `update_current_highlight` et le timer de progression (quand la fenêtre est visible) ; une **signature** de l'état évite de re-styler les boutons quand rien ne change. Le style passe par la propriété dynamique `ds` (`[ds=playing]` dans la feuille de style) suivie d'un `unpolish/polish`.
+- Les actions locales appellent directement `ControlWindow` (`play_scene`, `go_next`, `go_previous`, `stop_playback`, `toggle_output_fullscreen`).
+- **Option Companion** (`COMPANION_ENABLED`, désactivée par défaut) : les touches `PF / Scène Off / Salle on/off / Salle 20 %` envoient `POST http://<hote:port>/api/location/10/3/<colonne>/press` à Bitfocus Companion (≥ 3.0), dans un thread séparé (timeout 2 s) qui renvoie le résultat par signal Qt. Pas d'authentification ni de retour d'état. Désactivée : aucune touche, aucun menu, aucune connexion réseau. L'adresse est stockée dans `QSettings("JBS", "Studio")`.
 
 ## 3.5 API HTTP et threads
 
@@ -251,7 +281,9 @@ Les champs manquants prennent leur valeur par défaut au chargement (`_write_sho
 
 ## 3.7 Limites connues
 
-- Pas d'authentification sur l'API.
+- Pas d'authentification sur l'API (ni sur l'option Companion).
+- Le Streamdeck (boitier) n'a pas de retour d'état pour les touches de lumière.
+- La disposition du boitier est codée en dur (`DECK_BOTTOM`, 21 scènes par page).
 - Un seul show en mémoire, pas d'annulation (undo).
 - Le préchargement ne couvre que la scène N+1.
 - Pas de gestion de la disparition d'un fichier au moment de la lecture.

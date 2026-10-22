@@ -73,6 +73,11 @@ IS_PLAYING_ROLE = Qt.UserRole + 11
 # Derniere ligne : PF, Scene Off, Salle on/off, Salle 20%, Noir Silence,
 # Plein Ecran, Precedente, GO.
 DECK_SCENES_PER_PAGE = 21
+# Option Companion (touches de lumiere du boitier), DESACTIVEE par defaut.
+# Mettre True (ou lancer avec JBS_COMPANION=1) pour afficher les 4 touches
+# PF / Scene Off / Salle on/off / Salle 20% et le menu "Adresse de Companion...".
+# Desactivee : aucune touche, aucun menu, aucune connexion reseau.
+COMPANION_ENABLED = os.environ.get("JBS_COMPANION", "").lower() in ("1", "true", "yes")
 COMPANION_DEFAULT_ADDRESS = "10.37.4.10:8000"   # hote:port de Bitfocus Companion
 COMPANION_PAGE = 10                              # page du pupitre dans Companion
 # Touches de la derniere ligne : (colonne, ligne1, ligne2, action)
@@ -338,6 +343,8 @@ class DeckWindow(QWidget):
 
         self.btn_go = None
         for col, l1, l2, action in DECK_BOTTOM:
+            if action == "companion" and not COMPANION_ENABLED:
+                continue          # option Companion desactivee : case laissee vide
             text = l1 + ("\n" + l2 if l2 else "")
             style = {"companion": "light", "stop": "stop", "next": "go"}.get(action, "")
             if action == "companion":
@@ -360,6 +367,7 @@ class DeckWindow(QWidget):
         self.status.setStyleSheet("color: #aaa; font-size: 11px;")
         self.status.setFixedHeight(16)
         layout.addWidget(self.status)
+        self.status.setVisible(COMPANION_ENABLED)
         self.pressResult.connect(self._on_result)
 
     def resizeEvent(self, event):
@@ -894,10 +902,11 @@ class ControlWindow(QMainWindow):
         action_deck = QAction("Afficher le Streamdeck (boitier)", self, checkable=True)
         action_deck.toggled.connect(self.btn_deck.setChecked)
         self.btn_deck.toggled.connect(action_deck.setChecked)
-        action_deck_addr = QAction("Adresse de Companion...", self)
-        action_deck_addr.triggered.connect(self.deck_window.ask_address)
         deck_menu.addAction(action_deck)
-        deck_menu.addAction(action_deck_addr)
+        if COMPANION_ENABLED:
+            action_deck_addr = QAction("Adresse de Companion...", self)
+            action_deck_addr.triggered.connect(self.deck_window.ask_address)
+            deck_menu.addAction(action_deck_addr)
 
         screen_menu = menubar.addMenu("Ecran de sortie")
 

@@ -43,8 +43,8 @@ import urllib.request
 from urllib.parse import urlparse
 
 import vlc
-from PyQt5.QtCore import Qt, QObject, QSettings, QTimer, pyqtSignal
-from PyQt5.QtGui import QGuiApplication, QKeySequence, QBrush, QColor, QPalette, QPen
+from PyQt5.QtCore import Qt, QObject, QPointF, QRectF, QSettings, QSize, QTimer, pyqtSignal
+from PyQt5.QtGui import QGuiApplication, QIcon, QPainter, QPixmap, QKeySequence, QBrush, QColor, QPalette, QPen
 from PyQt5.QtWidgets import (
     QAbstractItemView, QAction, QApplication, QCheckBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -74,9 +74,10 @@ IS_PLAYING_ROLE = Qt.UserRole + 11
 # Plein Ecran, Precedente, GO.
 DECK_SCENES_PER_PAGE = 21
 # Option Companion (touches de lumiere du boitier), DESACTIVEE par defaut.
-# Mettre True (ou lancer avec JBS_COMPANION=1) pour afficher les 4 touches
-# PF / Scene Off / Salle on/off / Salle 20% et le menu "Adresse de Companion...".
-# Desactivee : aucune touche, aucun menu, aucune connexion reseau.
+# Les 4 touches PF / Scene Off / Salle on/off / Salle 20% sont toujours AFFICHEES
+# (les classes s'entrainent sur le boitier) mais, desactivee, elles n'ont aucune
+# action : pas de menu "Adresse de Companion...", aucune connexion reseau.
+# Mettre True (ou lancer avec JBS_COMPANION=1) pour qu'elles agissent vraiment.
 COMPANION_ENABLED = os.environ.get("JBS_COMPANION", "").lower() in ("1", "true", "yes")
 COMPANION_DEFAULT_ADDRESS = "10.37.4.10:8000"   # hote:port de Bitfocus Companion
 COMPANION_PAGE = 10                              # page du pupitre dans Companion
@@ -133,6 +134,64 @@ def scene_label(number, path, audio_path=None, name=None):
     if name:
         return f"{number}. {name} \u2014 {media_text}"
     return f"{number} \u2014 {media_text}"
+
+
+def _draw_icon(kind, color, size=32):
+    """Dessine une icone vectorielle (pas d'emoji : ils s'affichent en carre
+    quand aucune police d'emoji n'est installee)."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    c = QColor(color)
+    pen = p.pen()
+    pen.setColor(c)
+    pen.setWidthF(2.4)
+    pen.setJoinStyle(Qt.RoundJoin)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    if kind in ("lock_open", "lock_closed"):
+        p.setBrush(c)
+        p.drawRoundedRect(QRectF(7, 14, 18, 13), 2.5, 2.5)          # corps
+        p.setBrush(Qt.NoBrush)
+        if kind == "lock_closed":
+            p.drawArc(QRectF(10, 4, 12, 15), 0, 180 * 16)             # anse fermee
+            p.drawLine(QPointF(10, 11.5), QPointF(10, 14))
+            p.drawLine(QPointF(22, 11.5), QPointF(22, 14))
+        else:
+            p.drawArc(QRectF(10, 4, 12, 15), 0, 180 * 16)             # anse ouverte
+            p.drawLine(QPointF(10, 11.5), QPointF(10, 14))
+    elif kind == "floppy":
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(5, 5, 22, 22), 2.5, 2.5)
+        p.setBrush(c)
+        p.drawRect(QRectF(10, 5, 11, 7))                              # volet metallique
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(QRectF(9, 17, 14, 10))                             # etiquette
+    elif kind == "screen":
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(4, 6, 24, 16), 2, 2)
+        p.drawLine(QPointF(16, 22), QPointF(16, 27))
+        p.drawLine(QPointF(10, 27), QPointF(22, 27))
+    elif kind == "fullscreen":
+        for (x, y, dx, dy) in ((5, 5, 1, 1), (27, 5, -1, 1), (5, 27, 1, -1), (27, 27, -1, -1)):
+            p.drawLine(QPointF(x, y), QPointF(x + 8 * dx, y))
+            p.drawLine(QPointF(x, y), QPointF(x, y + 8 * dy))
+    elif kind == "deck":
+        p.setBrush(Qt.NoBrush)
+        for r in range(3):
+            for col in range(3):
+                p.drawRoundedRect(QRectF(5 + col * 8.5, 5 + r * 8.5, 6, 6), 1.2, 1.2)
+    p.end()
+    return pm
+
+
+def make_icon(kind, off_color="#333333", on_kind=None, on_color="#ffffff"):
+    """Icone a deux etats (Off = bouton au repos, On = bouton coche/colore)."""
+    icon = QIcon()
+    icon.addPixmap(_draw_icon(kind, off_color), QIcon.Normal, QIcon.Off)
+    icon.addPixmap(_draw_icon(on_kind or kind, on_color), QIcon.Normal, QIcon.On)
+    return icon
 
 
 class PlaylistWidget(QListWidget):
@@ -286,8 +345,8 @@ class DeckWindow(QWidget):
     - UP / DOWN : changent de page de scenes.
     - Prec. / GO : /previous et /next ; GO affiche la scene en cours.
     - Noir Silence : stop ; Plein Ecran : plein ecran de la sortie.
-    - PF, Scene Off, Salle on/off, Salle 20% : lumieres geres par Home Assistant,
-      donc appui du bouton correspondant dans Companion
+    - PF, Scene Off, Salle on/off, Salle 20% : affichees mais SANS action, sauf si
+      COMPANION_ENABLED : alors appui du bouton correspondant dans Companion
       (POST /api/location/<page>/<ligne>/<colonne>/press, Companion >= 3).
     """
     pressResult = pyqtSignal(str, bool)
@@ -343,12 +402,13 @@ class DeckWindow(QWidget):
 
         self.btn_go = None
         for col, l1, l2, action in DECK_BOTTOM:
-            if action == "companion" and not COMPANION_ENABLED:
-                continue          # option Companion desactivee : case laissee vide
             text = l1 + ("\n" + l2 if l2 else "")
             style = {"companion": "light", "stop": "stop", "next": "go"}.get(action, "")
             if action == "companion":
-                slot = lambda c=col, t=text: self.press_companion(c, t.replace("\n", " "))
+                # Option Companion desactivee : la touche est affichee (pour que les
+                # classes s'entrainent) mais n'a AUCUNE action.
+                slot = (lambda c=col, t=text: self.press_companion(c, t.replace("\n", " "))) \
+                    if COMPANION_ENABLED else None
             elif action == "stop":
                 slot = ctrl.stop_playback
             elif action == "fullscreen":
@@ -664,29 +724,36 @@ class ControlWindow(QMainWindow):
         toolbar = QHBoxLayout()
         self.btn_lock = QToolButton()
         self.btn_lock.setCheckable(True)
-        self.btn_lock.setText("\U0001F513\nVerrouillage")
+        self.btn_lock.setText("Verrouillage")
+        self.btn_lock.setIcon(make_icon("lock_open", on_kind="lock_closed"))
         self.btn_lock.setToolTip("Verrouiller le spectacle (bloque l'edition)")
         self.btn_lock.toggled.connect(self.set_show_locked)
         self.btn_save = QToolButton()
-        self.btn_save.setText("\U0001F4BE\nEnregistrer")
+        self.btn_save.setText("Enregistrer")
+        self.btn_save.setIcon(make_icon("floppy"))
         self.btn_save.setToolTip("Enregistrer le show (Ctrl+S)")
         self.btn_save.clicked.connect(self.save_show)
         self.btn_screen = QToolButton()
         self.btn_screen.setCheckable(True)
         self.btn_screen.setChecked(True)
-        self.btn_screen.setText("\U0001F5A5\nSortie")
+        self.btn_screen.setText("Sortie")
+        self.btn_screen.setIcon(make_icon("screen", off_color="#dddddd"))
         self.btn_screen.setToolTip("Activer / desactiver l'ecran de sortie")
         self.btn_fullscreen = QToolButton()
-        self.btn_fullscreen.setText("\u26f6\nPlein ecran")
+        self.btn_fullscreen.setText("Plein ecran")
+        self.btn_fullscreen.setIcon(make_icon("fullscreen"))
         self.btn_fullscreen.setToolTip("Plein ecran de la sortie on/off (F)")
         self.btn_fullscreen.clicked.connect(lambda: self.toggle_output_fullscreen())
         self.deck_window = DeckWindow(self)  # pupitre de scenes
         self.btn_deck = QToolButton()
         self.btn_deck.setCheckable(True)
-        self.btn_deck.setText("\U0001F39B\nStreamdeck\n(boitier)")
+        self.btn_deck.setText("Streamdeck\n(boitier)")
+        self.btn_deck.setIcon(make_icon("deck"))
         self.btn_deck.setToolTip("Afficher / masquer le Streamdeck (boitier)")
         self.btn_deck.toggled.connect(self._on_deck_toggled)
         for b_ in (self.btn_lock, self.btn_save, self.btn_screen, self.btn_fullscreen, self.btn_deck):
+            b_.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            b_.setIconSize(QSize(28, 28))
             b_.setStyleSheet("QToolButton { font-size: 13px; padding: 4px 10px; min-width: 70px; }"
                              "QToolButton:checked { background-color: #b71c1c; }")
             toolbar.addWidget(b_)
@@ -997,7 +1064,7 @@ class ControlWindow(QMainWindow):
     def set_show_locked(self, locked):
         """Cadenas : bloque l'edition, garde les commandes de jeu."""
         self.show_locked = locked
-        self.btn_lock.setText("\U0001F512\nVerrouillage" if locked else "\U0001F513\nVerrouillage")
+        # (l'icone cadenas ferme/ouvert suit l'etat coche du bouton)
         self.playlist.setAcceptDrops(not locked)
         self.playlist.setDragEnabled(not locked)
         self.playlist.setDragDropMode(

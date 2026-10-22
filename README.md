@@ -74,7 +74,7 @@ Fenêtre optionnelle (bouton **Streamdeck (boitier)** ou menu du même nom) qui 
 | | Plein Écran | Plein écran de la sortie |
 | | ◀ Préc. / GO | Scène précédente / suivante ; GO affiche le numéro en cours (orange si la scène est vide) |
 
-Les touches **PF, Scène Off, Salle on/off, Salle 20 %** (lumières, pilotées par Home Assistant via Companion) sont une **option désactivée par défaut** : les quatre cases restent vides. Pour les activer, mettre `COMPANION_ENABLED = True` dans `media_scene_player.py` ou lancer avec `JBS_COMPANION=1`. Un menu « Adresse de Companion… » apparaît alors (défaut `10.37.4.10:8000`).
+Les touches **PF, Scène Off, Salle on/off, Salle 20 %** (lumières) sont toujours affichées, pour que les classes s'entraînent sur le boitier, mais **sans aucune action** par défaut. Option Companion : en mettant `COMPANION_ENABLED = True` dans `media_scene_player.py` (ou en lançant avec `JBS_COMPANION=1`), elles envoient l'appui du bouton à Bitfocus Companion (pilotage Home Assistant) et un menu « Adresse de Companion… » apparaît (défaut `10.37.4.10:8000`).
 
 Le Streamdeck (boitier) reste utilisable quand le spectacle est verrouillé.
 
@@ -244,7 +244,7 @@ Une seule vue : barre d'outils (Verrouillage, Enregistrer, Sortie, Plein écran,
 - Les scènes sont adressées par **numéro** (`_numbers()` : numéro → ligne), pas par position dans la liste, comme `/scene/<n>`. Page = 21 scènes, 2 pages pour 40 scènes.
 - `refresh()` est appelé par `update_current_highlight` et le timer de progression (quand la fenêtre est visible) ; une **signature** de l'état évite de re-styler les boutons quand rien ne change. Le style passe par la propriété dynamique `ds` (`[ds=playing]` dans la feuille de style) suivie d'un `unpolish/polish`.
 - Les actions locales appellent directement `ControlWindow` (`play_scene`, `go_next`, `go_previous`, `stop_playback`, `toggle_output_fullscreen`).
-- **Option Companion** (`COMPANION_ENABLED`, désactivée par défaut) : les touches `PF / Scène Off / Salle on/off / Salle 20 %` envoient `POST http://<hote:port>/api/location/10/3/<colonne>/press` à Bitfocus Companion (≥ 3.0), dans un thread séparé (timeout 2 s) qui renvoie le résultat par signal Qt. Pas d'authentification ni de retour d'état. Désactivée : aucune touche, aucun menu, aucune connexion réseau. L'adresse est stockée dans `QSettings("JBS", "Studio")`.
+- **Option Companion** (`COMPANION_ENABLED`, désactivée par défaut) : les touches `PF / Scène Off / Salle on/off / Salle 20 %` envoient `POST http://<hote:port>/api/location/10/3/<colonne>/press` à Bitfocus Companion (≥ 3.0), dans un thread séparé (timeout 2 s) qui renvoie le résultat par signal Qt. Pas d'authentification ni de retour d'état. Désactivée : les touches sont affichées mais sans action, sans menu ni connexion réseau. L'adresse est stockée dans `QSettings("JBS", "Studio")`.
 
 ## 3.5 API HTTP et threads
 
